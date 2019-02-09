@@ -1,18 +1,12 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
-using ImageClassification.ImageData;
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.ImageAnalytics;
-using Microsoft.ML.Transforms;
-using Microsoft.ML.Runtime;
 using Microsoft.ML;
-using Microsoft.ML.Trainers;
-using Microsoft.ML.Runtime.Api;
+using Microsoft.ML.Data;
+using Microsoft.ML.ImageAnalytics;
+using ImageClassification.ImageData;
 using static ImageClassification.Model.ConsoleHelpers;
-using Microsoft.ML.Runtime.Learners;
-using Microsoft.ML.Transforms.Categorical;
-using Microsoft.ML.Transforms.Conversions;
+using Microsoft.ML.Core.Data;
 
 namespace ImageClassification.Model
 {
@@ -23,6 +17,9 @@ namespace ImageClassification.Model
         private readonly string inputModelLocation;
         private readonly string outputModelLocation;
         private readonly MLContext mlContext;
+        private static string LabelTokey = nameof(LabelTokey);
+        private static string ImageReal = nameof(ImageReal);
+        private static string PredictedLabelValue = nameof(PredictedLabelValue);
 
         public ModelBuilder(string dataLocation, string imagesFolder, string inputModelLocation, string outputModelLocation)
         {
@@ -54,39 +51,32 @@ namespace ImageClassification.Model
 
 
 
-            var loader = new TextLoader(mlContext,
-                new TextLoader.Arguments
-                {
-                    Column = new[] {
-                        new TextLoader.Column("ImagePath", DataKind.Text, 0),
-                        new TextLoader.Column("Label", DataKind.Text, 1)
-                    }
-                });
+            var data = mlContext.Data.ReadFromTextFile<ImageNetData>(path:dataLocation, hasHeader: true);
 
-            var pipeline = mlContext.Transforms.Categorical.MapValueToKey("Label", "LabelTokey")
-                            .Append(new ImageLoadingEstimator(mlContext, imagesFolder, ("ImagePath", "ImageReal")))
-                            .Append(new ImageResizingEstimator(mlContext, "ImageReal", "ImageReal", ImageNetSettings.imageHeight, ImageNetSettings.imageWidth))
-                            .Append(new ImagePixelExtractingEstimator(mlContext, new[] { new ImagePixelExtractorTransform.ColumnInfo("ImageReal", "input", interleave: ImageNetSettings.channelsLast, offset: ImageNetSettings.mean) }))
-                            .Append(new TensorFlowEstimator(mlContext, featurizerModelLocation, new[] { "input" }, new[] { "softmax2_pre_activation" }))
-                            .Append(new SdcaMultiClassTrainer(mlContext, "softmax2_pre_activation", "LabelTokey"))
-                            .Append(new KeyToValueEstimator(mlContext, ("PredictedLabel", "PredictedLabelValue")));
+            var pipeline = mlContext.Transforms.Conversion.MapValueToKey(outputColumnName: LabelTokey,inputColumnName:DefaultColumnNames.Label)
+                            .Append(mlContext.Transforms.LoadImages(imagesFolder, (ImageReal, nameof(ImageNetData.ImagePath))))
+                            .Append(mlContext.Transforms.Resize(outputColumnName:ImageReal, imageWidth: ImageNetSettings.imageWidth, imageHeight: ImageNetSettings.imageHeight, inputColumnName: ImageReal))
+                            .Append(mlContext.Transforms.ExtractPixels(new ImagePixelExtractorTransformer.ColumnInfo(name: "input",inputColumnName: ImageReal,  interleave: ImageNetSettings.channelsLast, offset: ImageNetSettings.mean)))
+                            .Append(mlContext.Transforms.ScoreTensorFlowModel(modelLocation:featurizerModelLocation, outputColumnNames: new[] { "softmax2_pre_activation" },inputColumnNames: new[] { "input" }))
+                            .Append(mlContext.MulticlassClassification.Trainers.LogisticRegression(labelColumn:LabelTokey, featureColumn:"softmax2_pre_activation"))
+                            .Append(mlContext.Transforms.Conversion.MapKeyToValue((PredictedLabelValue,DefaultColumnNames.PredictedLabel)));
 
-            // Train the pipeline
+            // Train the model
             ConsoleWriteHeader("Training classification model");
-            var data = loader.Read(new MultiFileSource(dataLocation));
-            var model = pipeline.Fit(data);
+            ITransformer model = pipeline.Fit(data);
 
             // Process the training data through the model
             // This is an optional step, but it's useful for debugging issues
             var trainData = model.Transform(data);
-            var loadedModelOutputColumnNames = trainData.Schema.GetColumnNames();
-            var trainData2 = trainData.AsEnumerable<ImageNetPipeline>(mlContext, false, true).ToList();
+            var loadedModelOutputColumnNames = trainData.Schema
+                .Where(col => !col.IsHidden).Select(col => col.Name);
+            var trainData2 = mlContext.CreateEnumerable<ImageNetPipeline>(trainData, false, true).ToList();
             trainData2.ForEach(pr => ConsoleWriteImagePrediction(pr.ImagePath,pr.PredictedLabelValue, pr.Score.Max()));
 
             // Get some performance metric on the model using training data            
-            var sdcaContext = new MulticlassClassificationContext(mlContext);
+            var sdcaContext = new MulticlassClassificationCatalog(mlContext);
             ConsoleWriteHeader("Classification metrics");
-            var metrics = sdcaContext.Evaluate(trainData, label: "LabelTokey", predictedLabel: "PredictedLabel");
+            var metrics = sdcaContext.Evaluate(trainData, label: LabelTokey, predictedLabel: DefaultColumnNames.PredictedLabel);
             Console.WriteLine($"LogLoss is: {metrics.LogLoss}");
             Console.WriteLine($"PerClassLogLoss is: {String.Join(" , ", metrics.PerClassLogLoss.Select(c => c.ToString()))}");
 
@@ -94,7 +84,8 @@ namespace ImageClassification.Model
             ConsoleWriteHeader("Save model to local file");
             ModelHelpers.DeleteAssets(outputModelLocation);
             using (var f = new FileStream(outputModelLocation, FileMode.Create))
-                model.SaveTo(mlContext, f);
+                mlContext.Model.Save(model, f);
+
             Console.WriteLine($"Model saved: {outputModelLocation}");
         }
 

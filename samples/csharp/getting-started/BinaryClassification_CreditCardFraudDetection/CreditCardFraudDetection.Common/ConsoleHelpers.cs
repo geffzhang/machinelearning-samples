@@ -1,7 +1,7 @@
 ﻿using CreditCardFraudDetection.Common.DataModels;
+using Microsoft.Data.DataView;
 using Microsoft.ML;
-using Microsoft.ML.Runtime.Api;
-using Microsoft.ML.Runtime.Data;
+using Microsoft.ML.Data;
 using System;
 using System.IO;
 using System.IO.Compression;
@@ -111,9 +111,9 @@ namespace CreditCardFraudDetection.Common
 
         public static void ShowObservations(MLContext env, IDataView data, bool label = true, int count = 2)
         {
-            data
+            env
                // Convert to an enumerable of user-defined type. 
-               .AsEnumerable<TransactionObservation>(env, reuseRowObject: false)
+               .CreateEnumerable<TransactionObservation>(data, reuseRowObject: false)
                .Where(x => x.Label == label)
                // Take a couple values as an array.
                .Take(count)
@@ -124,9 +124,9 @@ namespace CreditCardFraudDetection.Common
 
         public static void ShowPredictions(MLContext env, IDataView data, bool label = true, int count = 2)
         {
-            data
+            env
                // Convert to an enumerable of user-defined type. 
-               .AsEnumerable<TransactionFraudPrediction>(env, reuseRowObject: false)
+               .CreateEnumerable<TransactionFraudPrediction>(data, reuseRowObject: false)
                .Where(x => x.PredictedLabel == label)
                // Take a couple values as an array.
                .Take(count)

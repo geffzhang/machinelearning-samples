@@ -9,12 +9,11 @@ using Microsoft.Extensions.Configuration;
 
 using Microsoft.ML;
 using Microsoft.ML.Transforms.Conversions;
-using Microsoft.ML.Runtime.Learners;
 using Microsoft.ML.Core.Data;
 
 using Common;
 using GitHubLabeler.DataStructures;
-using Microsoft.ML.Runtime.Data;
+using Microsoft.ML.Data;
 
 namespace GitHubLabeler
 {
@@ -55,26 +54,15 @@ namespace GitHubLabeler
             var mlContext = new MLContext(seed: 0);
 
             // STEP 1: Common data loading configuration
-            TextLoader textLoader = mlContext.Data.TextReader(new TextLoader.Arguments()
-                                    {
-                                        Separator = "tab",
-                                        HasHeader = true,
-                                        Column = new[]
-                                                    {
-                                                        new TextLoader.Column("ID", DataKind.Text, 0),
-                                                        new TextLoader.Column("Area", DataKind.Text, 1),
-                                                        new TextLoader.Column("Title", DataKind.Text, 2),
-                                                        new TextLoader.Column("Description", DataKind.Text, 3),
-                                                    }
-                                    });
-
-            var trainingDataView = textLoader.Read(DataSetLocation);
-
+            var trainingDataView = mlContext.Data.ReadFromTextFile<GitHubIssue>(DataSetLocation, hasHeader: true, separatorChar:'\t');
+             
             // STEP 2: Common data process configuration with pipeline data transformations
-            var dataProcessPipeline = mlContext.Transforms.Categorical.MapValueToKey("Area", "Label")
-                            .Append(mlContext.Transforms.Text.FeaturizeText("Title", "TitleFeaturized"))
-                            .Append(mlContext.Transforms.Text.FeaturizeText("Description", "DescriptionFeaturized"))
-                            .Append(mlContext.Transforms.Concatenate("Features", "TitleFeaturized", "DescriptionFeaturized"));
+            var dataProcessPipeline = mlContext.Transforms.Conversion.MapValueToKey(outputColumnName: DefaultColumnNames.Label,inputColumnName:nameof(GitHubIssue.Area))
+                            .Append(mlContext.Transforms.Text.FeaturizeText(outputColumnName: "TitleFeaturized",inputColumnName:nameof(GitHubIssue.Title)))
+                            .Append(mlContext.Transforms.Text.FeaturizeText(outputColumnName: "DescriptionFeaturized", inputColumnName: nameof(GitHubIssue.Description)))
+                            .Append(mlContext.Transforms.Concatenate(outputColumnName:DefaultColumnNames.Features, "TitleFeaturized", "DescriptionFeaturized"))
+                            //Sample Caching the DataView so estimators iterating over the data multiple times, instead of always reading from file, using the cache might get better performance
+                            .AppendCacheCheckpoint(mlContext);  //In this sample, only when using OVA (Not SDCA) the cache improves the training time, since OVA works multiple times/iterations over the same data
 
             // (OPTIONAL) Peek data (such as 2 records) in training DataView after applying the ProcessPipeline's transformations into "Features" 
             Common.ConsoleHelper.PeekDataViewInConsole<GitHubIssue>(mlContext, trainingDataView, dataProcessPipeline, 2);
@@ -98,7 +86,8 @@ namespace GitHubLabeler
                     // In this strategy, a binary classification algorithm is used to train one classifier for each class, "
                     // which distinguishes that class from all other classes. Prediction is then performed by running these binary classifiers, "
                     // and choosing the prediction with the highest confidence score.
-                    trainer = new Ova(mlContext, averagedPerceptronBinaryTrainer);
+                    trainer = mlContext.MulticlassClassification.Trainers.OneVersusAll(averagedPerceptronBinaryTrainer);
+                        
                     break;
                 }
                 default:
@@ -107,25 +96,47 @@ namespace GitHubLabeler
 
             //Set the trainer/algorithm and map label to value (original readable state)
             var trainingPipeline = dataProcessPipeline.Append(trainer)
-                    .Append(mlContext.Transforms.Conversion.MapKeyToValue("PredictedLabel"));
+                    .Append(mlContext.Transforms.Conversion.MapKeyToValue(DefaultColumnNames.PredictedLabel));
 
             // STEP 4: Cross-Validate with single dataset (since we don't have two datasets, one for training and for evaluate)
             // in order to evaluate and get the model's accuracy metrics
+
             Console.WriteLine("=============== Cross-validating to get model's accuracy metrics ===============");
 
-            var crossValidationResults = mlContext.MulticlassClassification.CrossValidate(trainingDataView, trainingPipeline, numFolds: 6, labelColumn:"Label");
+            //Measure cross-validation time
+            var watchCrossValTime = System.Diagnostics.Stopwatch.StartNew();
+
+            var crossValidationResults = mlContext.MulticlassClassification.CrossValidate(data:trainingDataView, estimator:trainingPipeline, numFolds: 6, labelColumn:DefaultColumnNames.Label);
+
+            //Stop measuring time
+            watchCrossValTime.Stop();
+            long elapsedMs = watchCrossValTime.ElapsedMilliseconds;
+            Console.WriteLine($"Time Cross-Validating: {elapsedMs} miliSecs");
+           
+            //(CDLTLL-Pending-TODO)
+            //
             ConsoleHelper.PrintMulticlassClassificationFoldsAverageMetrics(trainer.ToString(), crossValidationResults);
 
             // STEP 5: Train the model fitting to the DataSet
             Console.WriteLine("=============== Training the model ===============");
+
+            //Measure training time
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+
             var trainedModel = trainingPipeline.Fit(trainingDataView);
+
+            //Stop measuring time
+            watch.Stop();
+            long elapsedCrossValMs = watch.ElapsedMilliseconds;
+
+            Console.WriteLine($"Time Training the model: {elapsedCrossValMs} miliSecs");
 
             // (OPTIONAL) Try/test a single prediction with the "just-trained model" (Before saving the model)
             GitHubIssue issue = new GitHubIssue() { ID = "Any-ID", Title = "WebSockets communication is slow in my machine", Description = "The WebSockets communication used under the covers by SignalR looks like is going slow in my development machine.." };
             // Create prediction engine related to the loaded trained model
-            var predFunction = trainedModel.MakePredictionFunction<GitHubIssue, GitHubIssuePrediction>(mlContext);
+            var predEngine = trainedModel.CreatePredictionEngine<GitHubIssue, GitHubIssuePrediction>(mlContext);
             //Score
-            var prediction = predFunction.Predict(issue);
+            var prediction = predEngine.Predict(issue);
             Console.WriteLine($"=============== Single Prediction just-trained-model - Result: {prediction.Area} ===============");
             //
 
@@ -149,9 +160,9 @@ namespace GitHubLabeler
             var repoOwner = Configuration["GitHubRepoOwner"]; //IMPORTANT: This can be a GitHub User or a GitHub Organization
             var repoName = Configuration["GitHubRepoName"];
 
-            if (string.IsNullOrEmpty(token) ||
-                string.IsNullOrEmpty(repoOwner) ||
-                string.IsNullOrEmpty(repoName))
+            if (string.IsNullOrEmpty(token) || token == "YOUR - GUID - GITHUB - TOKEN" ||
+                string.IsNullOrEmpty(repoOwner) || repoOwner == "YOUR-REPO-USER-OWNER-OR-ORGANIZATION" ||
+                string.IsNullOrEmpty(repoName) || repoName == "YOUR-REPO-SINGLE-NAME" )
             {
                 Console.Error.WriteLine();
                 Console.Error.WriteLine("Error: please configure the credentials in the appsettings.json file");

@@ -1,5 +1,10 @@
 # Image Classification - Scoring sample
 
+| ML.NET version | API type          | Status                        | App Type    | Data type | Scenario            | ML Task                   | Algorithms                  |
+|----------------|-------------------|-------------------------------|-------------|-----------|---------------------|---------------------------|-----------------------------|
+| v0.10           | Dynamic API | up-to-date | Console app | Images and text labels | Images classification | TensorFlow Inceptionv3  | DeepLearning model |
+
+
 ## Problem
 Image classification is a common case in many business scenarios. For these cases, you can either use pre-trained models or train your own model to classify images specific to your custom domain. 
 
@@ -36,7 +41,7 @@ The training and testing images are located in the assets folders. These images 
 > https://commons.wikimedia.org/wiki/Teddy_bear  
 
 ## Pre-trained model
-There are multiple models are pre-trained for classifying images. In this case, we will use a model based on an Inception topology, and trained with images from Image.Net. This model can be downloaded from https://storage.googleapis.com/download.tensorflow.org/models/inception5h.zip, but it's also available at `/ src / ImageClassification / assets /inputs / inception / tensorflow_inception_graph.pb`.
+There are multiple models which are pre-trained for classifying images. In this case, we will use a model based on an Inception topology, and trained with images from Image.Net. This model can be downloaded from https://storage.googleapis.com/download.tensorflow.org/models/inception5h.zip, but it's also available at `/ src / ImageClassification / assets /inputs / inception / tensorflow_inception_graph.pb`.
 
 ##  Solution
 The console application project `ImageClassification.Score` can be used to classify sample images based on the pre-trained Inception-v3 TensorFlow model. 
@@ -54,23 +59,39 @@ You need to follow next steps in order to execute the classification test:
 There is a single project in the solution named `ImageClassification.Score`, which is responsible for loading the model in TensorFlow format, and then classify images.
 
 ### ML.NET: Model Scoring
-The `TextLoader.CreateReader()` is used to define the schema of the text file that will be used to load images in the ML.NET model.
+
+Define the schema of data in a class type and refer that type while loading data using TextLoader. Here the class type is ImageNetData. 
 
 ```csharp
- var loader = new TextLoader(env,
-    new TextLoader.Arguments
+public class ImageNetData
     {
-        Column = new[] {
-            new TextLoader.Column("ImagePath", DataKind.Text, 0)
-        }
-    });
+        [LoadColumn(0)]
+        public string ImagePath;
 
-var data = loader.Read(new MultiFileSource(dataLocation));
+        [LoadColumn(1)]
+        public string Label;
+
+        public static IEnumerable<ImageNetData> ReadFromCsv(string file, string folder)
+        {
+            return File.ReadAllLines(file)
+             .Select(x => x.Split('\t'))
+             .Select(x => new ImageNetData()
+             {
+                 ImagePath = Path.Combine(folder,x[0]),
+                 Label = x[1],
+             });
+        }
+    }
+```
+The first step is to load the data using TextLoader
+
+```csharp
+var data = mlContext.Data.ReadFromTextFile<ImageNetData>(dataLocation, hasHeader: true);
 ```
 
 The image file used to load images has two columns: the first one is defined as `ImagePath` and the second one is the `Label` corresponding to the image. 
 
-It is important to highlight that the label in this is not really used when scoring with the TensorFlow model. It is in this file only as a reference when testing the predictions so you can compare the actual label of each sample data with the predicted label provided by the TensorFlow model. That is why when loading the file with the 'TextLoader' above you just taking the ImagePath or name of the file but you are not taking the label.
+It is important to highlight that the label in the `ImageNetData` class is not really used when scoring with the TensorFlow model. It is used when testing the predictions so you can compare the actual label of each sample data with the predicted label provided by the TensorFlow model. 
 
 ```csv
 broccoli.jpg	broccoli
@@ -84,10 +105,10 @@ As you can observe, the file does not have a header row.
 The second step is to define the estimator pipeline. Usually, when dealing with deep neural networks, you must adapt the images to the format expected by the network. This is the reason images are resized and then transformed (mainly, pixel values are normalized across all R,G,B channels).
 
 ```csharp
- var pipeline = new ImageLoaderEstimator(env, imagesFolder, ("ImagePath", "ImageReal"))
-    .Append(new ImageResizerEstimator(env, "ImageReal", "ImageReal", ImageNetSettings.imageHeight, ImageNetSettings.imageWidth))
-    .Append(new ImagePixelExtractorEstimator(env, new[] { new ImagePixelExtractorTransform.ColumnInfo("ImageReal", "input", interleave: ImageNetSettings.channelsLast, offset: ImageNetSettings.mean) }))
-    .Append(new TensorFlowEstimator(env, modelLocation, new[] { "input" }, new[] { "softmax2" }));
+ var pipeline = mlContext.Transforms.LoadImages(imageFolder: imagesFolder, columns: (outputColumnName: ImageReal, inputColumnName: nameof(ImageNetData.ImagePath)))
+                            .Append(mlContext.Transforms.Resize(outputColumnName: ImageReal, imageWidth: ImageNetSettings.imageWidth, imageHeight: ImageNetSettings.imageHeight, inputColumnName: ImageReal))
+                            .Append(mlContext.Transforms.ExtractPixels(columns: new[] { new ImagePixelExtractorTransformer.ColumnInfo(name: InceptionSettings.inputTensorName, inputColumnName: ImageReal, interleave: ImageNetSettings.channelsLast, offset: ImageNetSettings.mean) }))
+                            .Append(mlContext.Transforms.ScoreTensorFlowModel(modelLocation:modelLocation, outputColumnNames:new[] { InceptionSettings.outputTensorName }, inputColumnNames: new[] { InceptionSettings.inputTensorName } ));
 
 ```
 You also need to check the neural network, and check the names of the input / output nodes. In order to inspect the model, you can use tools like [Netron](https://github.com/lutzroeder/netron), which is automatically installed with [Visual Studio Tools for AI](https://visualstudio.microsoft.com/downloads/ai-tools-vs/). 
@@ -95,11 +116,11 @@ These names are used later in the definition of the estimation pipe: in the case
 
 ![inspecting neural network with netron](./docs/images/netron.png)
 
-Finally, we extract the prediction function after *fitting* the estimator pipeline. The prediction function receives as parameter an object of type `ImageNetData` (containing 2 properties: `ImagePath` and `Label`), and then returns and object of type `ImagePrediction`.  
+Finally, we extract the prediction engine after *fitting* the estimator pipeline. The prediction engine receives as parameter an object of type `ImageNetData` (containing 2 properties: `ImagePath` and `Label`), and then returns and object of type `ImagePrediction`.  
 
 ```
  var modeld = pipeline.Fit(data);
- var predictionFunction = modeld.MakePredictionFunction<ImageNetData, ImageNetPrediction>(env);
+ var predictionEngine = modeld.CreatePredictionEngine<ImageNetData, ImageNetPrediction>(env);
 ```
 When obtaining the prediction, we get an array of floats in the property `PredictedLabels`. Each position in the array is assigned to a label, so for example, if the model has 5 different labels, the array will be length = 5. Each position in the array represents the label's probability in that position; the sum of all array values (probabilities) is equal to one. Then, you need to select the biggest value (probability), and check which is the assigned label to that position.
 
