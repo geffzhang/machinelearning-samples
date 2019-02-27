@@ -14,12 +14,17 @@ namespace SentimentAnalysisConsoleApp
     {
         private static string AppPath => Path.GetDirectoryName(Environment.GetCommandLineArgs()[0]);
 
-        private static readonly string BaseDatasetsLocation = @"../../../../Data";
-        private static readonly string TrainDataPath = $"{BaseDatasetsLocation}/wikipedia-detox-250-line-data.tsv";
-        private static readonly string TestDataPath = $"{BaseDatasetsLocation}/wikipedia-detox-250-line-test.tsv";
+        private static readonly string BaseDatasetsRelativePath = @"../../../../Data";
+        private static readonly string TrainDataRelativePath = $"{BaseDatasetsRelativePath}/wikipedia-detox-250-line-data.tsv";
+        private static readonly string TestDataRelativePath = $"{BaseDatasetsRelativePath}/wikipedia-detox-250-line-test.tsv";
 
-        private static readonly string BaseModelsPath = @"../../../../MLModels";
-        private static readonly string ModelPath = $"{BaseModelsPath}/SentimentModel.zip";
+        private static string TrainDataPath = GetDataSetAbsolutePath(TrainDataRelativePath);
+        private static string TestDataPath = GetDataSetAbsolutePath(TestDataRelativePath);
+
+        private static readonly string BaseModelsRelativePath = @"../../../../MLModels";
+        private static readonly string ModelRelativePath = $"{BaseModelsRelativePath}/SentimentModel.zip";
+
+        private static string ModelPath = GetDataSetAbsolutePath(ModelRelativePath);
 
         static void Main(string[] args)
         {
@@ -49,7 +54,7 @@ namespace SentimentAnalysisConsoleApp
             var dataProcessPipeline = mlContext.Transforms.Text.FeaturizeText(outputColumnName: DefaultColumnNames.Features, inputColumnName:nameof(SentimentIssue.Text));
 
             // (OPTIONAL) Peek data (such as 2 records) in training DataView after applying the ProcessPipeline's transformations into "Features" 
-            ConsoleHelper.PeekDataViewInConsole<SentimentIssue>(mlContext, trainingDataView, dataProcessPipeline, 2);
+            ConsoleHelper.PeekDataViewInConsole(mlContext, trainingDataView, dataProcessPipeline, 2);
             ConsoleHelper.PeekVectorColumnDataInConsole(mlContext, DefaultColumnNames.Features, trainingDataView, dataProcessPipeline, 1);
 
             // STEP 3: Set the training algorithm, then create and config the modelBuilder                            
@@ -95,8 +100,18 @@ namespace SentimentAnalysisConsoleApp
             var resultprediction = predEngine.Predict(sampleStatement);
 
             Console.WriteLine($"=============== Single Prediction  ===============");
-            Console.WriteLine($"Text: {sampleStatement.Text} | Prediction: {(Convert.ToBoolean(resultprediction.Prediction) ? "Toxic" : "Nice")} sentiment | Probability: {resultprediction.Probability} ");
+            Console.WriteLine($"Text: {sampleStatement.Text} | Prediction: {(Convert.ToBoolean(resultprediction.Prediction) ? "Negative" : "Nice")} sentiment | Probability: {resultprediction.Probability} ");
             Console.WriteLine($"==================================================");
+        }
+
+        public static string GetDataSetAbsolutePath(string relativeDatasetPath)
+        {
+            FileInfo _dataRoot = new FileInfo(typeof(Program).Assembly.Location);
+            string assemblyFolderPath = _dataRoot.Directory.FullName;
+
+            string fullPath = Path.Combine(assemblyFolderPath , relativeDatasetPath);
+
+            return fullPath;
         }
     }
 }

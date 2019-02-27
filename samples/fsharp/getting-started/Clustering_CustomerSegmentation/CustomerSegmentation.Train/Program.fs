@@ -76,8 +76,8 @@ let main _argv =
         //Create the MLContext to share across components for deterministic results
         let mlContext = MLContext(seed = Nullable 1);  //Seed set to any number so you have a deterministic environment
         // STEP 1: Common data loading configuration
-        let textLoader = 
-            mlContext.Data.CreateTextReader(
+        let pivotDataView = 
+            mlContext.Data.ReadFromTextFile(pivotCsv,
                 columns = 
                     [| 
                         TextLoader.Column("Features", Nullable DataKind.R4, [| TextLoader.Range(0, Nullable 31) |])
@@ -85,14 +85,12 @@ let main _argv =
                     |],
                 hasHeader = true,
                 separatorChar = ',')
-
-        let pivotDataView = textLoader.Read(pivotCsv)
         
         //STEP 2: Configure data transformations in pipeline
         let dataProcessPipeline =  
             EstimatorChain()
-                .Append(mlContext.Transforms.Projection.ProjectToPrincipalComponents("Features", "PCAFeatures", rank = 2))
-                .Append(mlContext.Transforms.Categorical.OneHotEncoding([| OneHotEncodingEstimator.ColumnInfo("LastName", "LastNameKey", OneHotEncodingTransformer.OutputKind.Ind) |]))
+                .Append(mlContext.Transforms.Projection.ProjectToPrincipalComponents("PCAFeatures", "Features", rank = 2))
+                .Append(mlContext.Transforms.Categorical.OneHotEncoding([| OneHotEncodingEstimator.ColumnInfo("LastNameKey", "LastName", OneHotEncodingTransformer.OutputKind.Ind) |]))
         
         // (Optional) Peek data in training DataView after applying the ProcessPipeline's transformations  
         Common.ConsoleHelper.peekDataViewInConsole<PivotObservation> mlContext pivotDataView (ConsoleHelper.downcastPipeline dataProcessPipeline) 10 |> ignore
